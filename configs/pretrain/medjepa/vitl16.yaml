@@ -1,4 +1,4 @@
-app: vjepa
+app: medjepa
 nodes: 16
 tasks_per_node: 8
 data:
