@@ -30,23 +30,19 @@ from torch.nn.parallel import DistributedDataParallel
 
 from timm.data import create_transform as timm_make_transforms
 
-import src.models.vision_transformer as vit
-from src.models.attentive_pooler import AttentiveClassifier
-from src.datasets.data_manager import (
-    init_data,
-)
+from src.models.attentive_pooler import AttentiveClassifier, LinearClassifier
 from src.utils.distributed import (
     init_distributed,
     AllReduce
-)
-from src.utils.schedulers import (
-    WarmupCosineSchedule,
-    CosineWDSchedule,
 )
 from src.utils.logging import (
     AverageMeter,
     CSVLogger
 )
+from .model import init_video_model, load_checkpoint
+from .dataloader import make_dataloader
+from .training import run_one_epoch, init_opt
+
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -85,9 +81,14 @@ def main(args_eval, resume_preempt=False):
 
     # -- DATA
     args_data = args_eval.get('data')
+    args_data_aug = args_eval.get('data_aug')
+    use_aws = args_data.get('use_aws', None)
     dataset_name = args_data.get('dataset_name')
     num_classes = args_data.get('num_classes')
-    root_path = args_data.get('root_path', None)
+
+    # root_path = args_data.get('root_path', None)
+    dataset_paths = args_data.get('datasets', [])
+    label_paths = args_data.get('labels', [])
     image_folder = args_data.get('image_folder', None)
     resolution = args_data.get('resolution', 224)
 
@@ -141,6 +142,7 @@ def main(args_eval, resume_preempt=False):
     # Initialize model
 
     # -- pretrained encoder (frozen)
+    """
     encoder = init_model(
         crop_size=resolution,
         device=device,
@@ -154,37 +156,99 @@ def main(args_eval, resume_preempt=False):
         use_SiLU=use_SiLU,
         tight_SiLU=tight_SiLU,
         use_sdpa=use_sdpa)
+    """
+
+    use_mask_tokens = True
+    cfgs_mask = [{
+        'aspect_ratio': [0.75, 1.5], 'num_blocks': 8, 'spatial_scale': [0.15, 0.15], 'temporal_scale': [1.0, 1.0],
+        'max_temporal_keep': 1.0, 'max_keep': None}, {'aspect_ratio': [0.75, 1.5], 'num_blocks': 2,
+        'spatial_scale': [0.7, 0.7], 'temporal_scale': [1.0, 1.0], 'max_temporal_keep': 1.0, 'max_keep': None
+    }]
+    zero_init_mask_tokens = True
+    num_frames = 16
+    pred_depth = 12
+    pred_embed_dim = 384
+
+    # """
+    encoder, predictor = init_video_model(
+        uniform_power=uniform_power,
+        use_mask_tokens=use_mask_tokens,
+        num_mask_tokens=len(cfgs_mask),
+        zero_init_mask_tokens=zero_init_mask_tokens,
+        device=device,
+        patch_size=patch_size,
+        num_frames=num_frames,
+        tubelet_size=tubelet_size,
+        model_name=model_name,
+        crop_size=resolution,
+        pred_depth=pred_depth,
+        pred_embed_dim=pred_embed_dim,
+        use_sdpa=use_sdpa,
+    )
+    # """
+
     encoder.eval()
     for p in encoder.parameters():
         p.requires_grad = False
 
     # -- init classifier
+    encoder_embed_dim = 1024
+    encoder_num_heads = 64
+    encoder_num_classes = 64
+
+    """
     classifier = AttentiveClassifier(
-        embed_dim=encoder.embed_dim,
-        num_heads=encoder.num_heads,
+        embed_dim=encoder_embed_dim,
+        num_heads=encoder_num_heads,
+        depth=1,
+        num_classes=num_classes
+    ).to(device)
+    """
+    classifier = LinearClassifier(
+        batch_size = batch_size,
+        embed_dim=encoder_embed_dim,
+        num_heads=encoder_num_heads,
         depth=1,
         num_classes=num_classes
     ).to(device)
 
     train_loader = make_dataloader(
         dataset_name=dataset_name,
-        root_path=root_path,
+        # root_path=root_path,
+        root_path=dataset_paths,
+        label_paths=label_paths,
         resolution=resolution,
         image_folder=image_folder,
         batch_size=batch_size,
         world_size=world_size,
         rank=rank,
-        training=True)
+        training=True,
+        use_aws=use_aws,
+        cfgs_data=args_data,
+        data_aug=args_data_aug,
+    )
     val_loader = make_dataloader(
         dataset_name=dataset_name,
-        root_path=root_path,
+        # root_path=root_path,
+        root_path=dataset_paths,
+        label_paths=label_paths,
         resolution=resolution,
         image_folder=image_folder,
         batch_size=batch_size,
         world_size=world_size,
         rank=rank,
-        training=False)
+        training=False,
+        use_aws=use_aws,
+        cfgs_data=args_data,
+        data_aug=args_data_aug,
+    )
     ipe = len(train_loader)
+
+    # itr = iter(train_loader)
+    # data = next(itr)
+    # buffer = data[0]
+    # raise RuntimeError( type(buffer), len(buffer), type(buffer[0]) )
+
     logger.info(f'Dataloader created... iterations per epoch: {ipe}')
 
     # -- optimizer and scheduler
@@ -198,7 +262,7 @@ def main(args_eval, resume_preempt=False):
         warmup=warmup,
         num_epochs=num_epochs,
         use_bfloat16=use_bfloat16)
-    classifier = DistributedDataParallel(classifier, static_graph=True)
+    # classifier = DistributedDataParallel(classifier, static_graph=True)
 
     # -- load training checkpoint
     start_epoch = 0
@@ -229,7 +293,7 @@ def main(args_eval, resume_preempt=False):
     # TRAIN LOOP
     for epoch in range(start_epoch, num_epochs):
         logger.info('Epoch %d' % (epoch + 1))
-        train_acc = run_one_epoch(
+        train_metric = run_one_epoch(
             device=device,
             training=True,
             encoder=encoder,
@@ -241,7 +305,7 @@ def main(args_eval, resume_preempt=False):
             data_loader=train_loader,
             use_bfloat16=use_bfloat16)
 
-        val_acc = run_one_epoch(
+        val_metric = run_one_epoch(
             device=device,
             training=False,
             encoder=encoder,
@@ -253,251 +317,9 @@ def main(args_eval, resume_preempt=False):
             data_loader=val_loader,
             use_bfloat16=use_bfloat16)
 
-        logger.info('[%5d] train: %.3f%% test: %.3f%%' % (epoch + 1, train_acc, val_acc))
+        logger.info('[%5d] train: %.3f test: %.3f' % (epoch + 1, train_metric['mAP'], val_metric['mAP']))
         if rank == 0:
-            csv_logger.log(epoch + 1, train_acc, val_acc)
+            csv_logger.log(epoch + 1, train_metric['mAP'], val_metric['mAP'])
         save_checkpoint(epoch + 1)
+    # end for
 
-
-def run_one_epoch(
-    device,
-    training,
-    encoder,
-    classifier,
-    scaler,
-    optimizer,
-    scheduler,
-    wd_scheduler,
-    data_loader,
-    use_bfloat16,
-):
-
-    classifier.train(mode=training)
-    criterion = torch.nn.CrossEntropyLoss()
-    top1_meter = AverageMeter()
-    for itr, data in enumerate(data_loader):
-
-        if training:
-            scheduler.step()
-            wd_scheduler.step()
-
-        with torch.cuda.amp.autocast(dtype=torch.float16, enabled=use_bfloat16):
-
-            imgs, labels = data[0].to(device), data[1].to(device)
-            with torch.no_grad():
-                outputs = encoder(imgs)
-                if not training:
-                    outputs = classifier(outputs)
-            if training:
-                outputs = classifier(outputs)
-
-        loss = criterion(outputs, labels)
-        top1_acc = 100. * outputs.max(dim=1).indices.eq(labels).sum() / len(imgs)
-        top1_acc = float(AllReduce.apply(top1_acc))
-        top1_meter.update(top1_acc)
-
-        if training:
-            if use_bfloat16:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(classifier.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(classifier.parameters(), 1.0)
-                optimizer.step()
-            optimizer.zero_grad()
-
-        if itr % 20 == 0:
-            logger.info('[%5d] %.3f%% (loss: %.3f) [mem: %.2e]'
-                        % (itr, top1_meter.avg, loss,
-                           torch.cuda.max_memory_allocated() / 1024.**2))
-
-    return top1_meter.avg
-
-
-def load_checkpoint(
-    device,
-    r_path,
-    classifier,
-    opt,
-    scaler
-):
-    try:
-        checkpoint = torch.load(r_path, map_location=torch.device('cpu'))
-        epoch = checkpoint['epoch']
-
-        # -- loading encoder
-        pretrained_dict = checkpoint['classifier']
-        msg = classifier.load_state_dict(pretrained_dict)
-        logger.info(f'loaded pretrained classifier from epoch {epoch} with msg: {msg}')
-
-        # -- loading optimizer
-        opt.load_state_dict(checkpoint['opt'])
-        if scaler is not None:
-            scaler.load_state_dict(checkpoint['scaler'])
-        logger.info(f'loaded optimizers from epoch {epoch}')
-        logger.info(f'read-path: {r_path}')
-        del checkpoint
-
-    except Exception as e:
-        logger.info(f'Encountered exception when loading checkpoint {e}')
-        epoch = 0
-
-    return classifier, opt, scaler, epoch
-
-
-def load_pretrained(
-    encoder,
-    pretrained,
-    checkpoint_key='target_encoder'
-):
-    logger.info(f'Loading pretrained model from {pretrained}')
-    checkpoint = torch.load(pretrained, map_location='cpu')
-    try:
-        pretrained_dict = checkpoint[checkpoint_key]
-    except Exception:
-        pretrained_dict = checkpoint['encoder']
-
-    pretrained_dict = {k.replace('module.', ''): v for k, v in pretrained_dict.items()}
-    pretrained_dict = {k.replace('backbone.', ''): v for k, v in pretrained_dict.items()}
-    for k, v in encoder.state_dict().items():
-        if k not in pretrained_dict:
-            logger.info(f'key "{k}" could not be found in loaded state dict')
-        elif pretrained_dict[k].shape != v.shape:
-            logger.info(f'key "{k}" is of different shape in model and loaded state dict')
-            pretrained_dict[k] = v
-    msg = encoder.load_state_dict(pretrained_dict, strict=False)
-    print(encoder)
-    logger.info(f'loaded pretrained model with msg: {msg}')
-    logger.info(f'loaded pretrained encoder from epoch: {checkpoint["epoch"]}\n path: {pretrained}')
-    del checkpoint
-    return encoder
-
-
-def make_dataloader(
-    dataset_name,
-    root_path,
-    image_folder,
-    batch_size,
-    world_size,
-    rank,
-    resolution=224,
-    training=False,
-    subset_file=None
-):
-    normalization = ((0.485, 0.456, 0.406),
-                     (0.229, 0.224, 0.225))
-    if training:
-        logger.info('implementing auto-agument strategy')
-        transform = timm_make_transforms(
-            input_size=resolution,
-            is_training=training,
-            auto_augment='original',
-            interpolation='bicubic',
-            re_prob=0.25,
-            re_mode='pixel',
-            re_count=1,
-            mean=normalization[0],
-            std=normalization[1])
-    else:
-        transform = transforms.Compose([
-            transforms.Resize(size=int(resolution * 256/224)),
-            transforms.CenterCrop(size=resolution),
-            transforms.ToTensor(),
-            transforms.Normalize(normalization[0], normalization[1])])
-
-    data_loader, _ = init_data(
-        data=dataset_name,
-        transform=transform,
-        batch_size=batch_size,
-        world_size=world_size,
-        rank=rank,
-        root_path=root_path,
-        image_folder=image_folder,
-        training=training,
-        copy_data=False,
-        drop_last=False,
-        subset_file=subset_file)
-    return data_loader
-
-
-def init_model(
-    device,
-    pretrained,
-    model_name,
-    patch_size=16,
-    crop_size=224,
-    # Video specific parameters
-    frames_per_clip=16,
-    tubelet_size=2,
-    use_sdpa=False,
-    use_SiLU=False,
-    tight_SiLU=True,
-    uniform_power=False,
-    checkpoint_key='target_encoder'
-):
-    encoder = vit.__dict__[model_name](
-        img_size=crop_size,
-        patch_size=patch_size,
-        num_frames=frames_per_clip,
-        tubelet_size=tubelet_size,
-        uniform_power=uniform_power,
-        use_sdpa=use_sdpa,
-        use_SiLU=use_SiLU,
-        tight_SiLU=tight_SiLU,
-    )
-    if frames_per_clip > 1:
-        def forward_prehook(module, input):
-            input = input[0]  # [B, C, H, W]
-            input = input.unsqueeze(2).repeat(1, 1, frames_per_clip, 1, 1)
-            return (input)
-
-        encoder.register_forward_pre_hook(forward_prehook)
-
-    encoder.to(device)
-    encoder = load_pretrained(encoder=encoder, pretrained=pretrained, checkpoint_key=checkpoint_key)
-    return encoder
-
-
-def init_opt(
-    classifier,
-    iterations_per_epoch,
-    start_lr,
-    ref_lr,
-    warmup,
-    num_epochs,
-    wd=1e-6,
-    final_wd=1e-6,
-    final_lr=0.0,
-    use_bfloat16=False
-):
-    param_groups = [
-        {
-            'params': (p for n, p in classifier.named_parameters()
-                       if ('bias' not in n) and (len(p.shape) != 1))
-        }, {
-            'params': (p for n, p in classifier.named_parameters()
-                       if ('bias' in n) or (len(p.shape) == 1)),
-            'WD_exclude': True,
-            'weight_decay': 0
-        }
-    ]
-
-    logger.info('Using AdamW')
-    optimizer = torch.optim.AdamW(param_groups)
-    scheduler = WarmupCosineSchedule(
-        optimizer,
-        warmup_steps=int(warmup*iterations_per_epoch),
-        start_lr=start_lr,
-        ref_lr=ref_lr,
-        final_lr=final_lr,
-        T_max=int(num_epochs*iterations_per_epoch))
-    wd_scheduler = CosineWDSchedule(
-        optimizer,
-        ref_wd=wd,
-        final_wd=final_wd,
-        T_max=int(num_epochs*iterations_per_epoch))
-    scaler = torch.cuda.amp.GradScaler() if use_bfloat16 else None
-    return optimizer, scaler, scheduler, wd_scheduler
