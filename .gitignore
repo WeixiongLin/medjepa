@@ -1,2 +1,6 @@
+wandb/
+checkpoints/
+data/
+logs/
 .*.swp
 *.pyc

@@ -13,19 +13,22 @@ from logging import getLogger
 
 import numpy as np
 import pandas as pd
-
+import json
+import random
 from decord import VideoReader, cpu
-
 import torch
 
 from src.datasets.utils.weighted_sampler import DistributedWeightedSampler
+from .oss import open_npy
+
 
 _GLOBAL_SEED = 0
 logger = getLogger()
 
 
-def make_videodataset(
+def make_joydataset(
     data_paths,
+    label_paths,
     batch_size,
     frames_per_clip=8,
     frame_step=4,
@@ -45,9 +48,11 @@ def make_videodataset(
     pin_mem=True,
     duration=None,
     log_dir=None,
+    use_aws=None,
 ):
-    dataset = VideoDataset(
+    dataset = RadiopediaDataset(
         data_paths=data_paths,
+        label_paths=label_paths,
         datasets_weights=datasets_weights,
         frames_per_clip=frames_per_clip,
         frame_step=frame_step,
@@ -58,7 +63,9 @@ def make_videodataset(
         filter_long_videos=filter_long_videos,
         duration=duration,
         shared_transform=shared_transform,
-        transform=transform)
+        transform=transform,
+        use_aws=use_aws,
+    )
 
     logger.info('VideoDataset dataset created')
     if datasets_weights is not None:
@@ -72,28 +79,63 @@ def make_videodataset(
             dataset,
             num_replicas=world_size,
             rank=rank,
-            shuffle=True)
+            shuffle=True
+        )
+    # end if
 
+    # raise RuntimeError( dist_sampler )
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        collate_fn=collator,
-        sampler=dist_sampler,
+        # collate_fn=collator,
+        # sampler=dist_sampler,
         batch_size=batch_size,
         drop_last=drop_last,
         pin_memory=pin_mem,
         num_workers=num_workers,
         persistent_workers=num_workers > 0)
-    logger.info('VideoDataset unsupervised data loader created')
+    logger.info('JOYDataset unsupervised data loader created')
 
     return dataset, data_loader, dist_sampler
 
 
-class VideoDataset(torch.utils.data.Dataset):
+def stack_images(images):
+    target_H = 512
+    target_W = 512
+    target_D = 4
+   
+    if len(images) == 0:
+        return torch.zeros((1,3,target_H,target_W,target_D))
+    MAX_D = 4
+    D_list = list(range(4,65,4))
+    
+    for ii in images:
+        try:
+            D = ii.shape[3]
+            if D > MAX_D:
+                MAX_D = D
+        except:
+            continue
+    for temp_D in D_list:
+        if abs(temp_D - MAX_D)< abs(target_D - MAX_D):
+            target_D = temp_D
+    
+    stack_images = []
+    for s in images:
+        if len(s.shape) == 3:
+        #print(s.shape)
+            stack_images.append(torch.nn.functional.interpolate(s.unsqueeze(0).unsqueeze(-1), size = (target_H,target_W,target_D)))
+        else:
+            stack_images.append(torch.nn.functional.interpolate(s.unsqueeze(0), size = (target_H,target_W,target_D)))
+    images = torch.cat(stack_images, dim=0)
+    return images
+
+
+class RadiopediaDataset(torch.utils.data.Dataset):
     """ Video classification dataset. """
 
     def __init__(
         self,
-        data_paths,
+        data_paths, label_paths,
         datasets_weights=None,
         frames_per_clip=16,
         frame_step=4,
@@ -105,8 +147,11 @@ class VideoDataset(torch.utils.data.Dataset):
         filter_short_videos=False,
         filter_long_videos=int(10**9),
         duration=None,  # duration in seconds
+        use_aws=None,
     ):
         self.data_paths = data_paths
+        self.label_paths = label_paths
+
         self.datasets_weights = datasets_weights
         self.frames_per_clip = frames_per_clip
         self.frame_step = frame_step
@@ -125,6 +170,14 @@ class VideoDataset(torch.utils.data.Dataset):
         # Load video paths and labels
         samples, labels = [], []
         self.num_samples_per_dataset = []
+
+        assert len(self.label_paths) == 1, "more than one label file provided"
+        label_path = self.label_paths[0]
+        with open(label_path, 'r') as f:
+            label_dict = json.load(f)
+        self.num_label = len(label_dict)
+        # raise RuntimeError('label_dict', label_dict)
+
         for data_path in self.data_paths:
 
             if data_path[-4:] == '.csv':
@@ -135,12 +188,38 @@ class VideoDataset(torch.utils.data.Dataset):
                 self.num_samples_per_dataset.append(num_samples)
 
             elif data_path[-4:] == '.npy':
+                raise RuntimeError( data_path )
                 data = np.load(data_path, allow_pickle=True)
                 data = list(map(lambda x: repr(x)[1:-1], data))
                 samples += data
                 labels += [0] * len(data)
                 num_samples = len(data)
                 self.num_samples_per_dataset.append(len(data))
+
+            elif data_path[-5:] == '.json':
+                with open(data_path, 'r') as f:
+                    data = json.load(f)
+
+                # samples = [data[src_url]["Samples"]['npy_path'] for src_url in data]
+                samples = []
+                for src_url in data:
+                    for sample in data[src_url]["Samples"]:
+                        npy_path = sample['npy_path']
+                        articles = sample['articles']  # ['Saccular cerebral aneurysm', 'Giant cerebral aneurysm']
+                        icd10s = sample['icd10s']  # ['I67']
+                        samples.append({
+                            'npy_path': npy_path,
+                            'articles': articles,
+                            'icd10s': icd10s,
+                        })
+                    # end for
+                # end for
+                # raise RuntimeError( len(samples), samples[0] )
+                # labels = [0 for _ in range(len(samples))]  # int, Optional
+                # raise RuntimeError( samples[0], labels[0], )
+                self.num_samples_per_dataset.append(len(data))
+            # end if            
+        # end for
 
         # [Optional] Weights for each sample to be used by downstream
         # weighted video sampler
@@ -151,16 +230,24 @@ class VideoDataset(torch.utils.data.Dataset):
                 self.sample_weights += [dw / ns] * ns
 
         self.samples = samples
-        self.labels = labels
+        self.labels = label_dict
+        self.use_aws = use_aws
 
     def __getitem__(self, index):
         sample = self.samples[index]
 
+        if self.use_aws:
+            npy_path = os.path.join(self.use_aws, sample['npy_path'])
+
         # Keep trying to load videos until you find a valid sample
         loaded_video = False
+
         while not loaded_video:
             # sample = str: /path/to/sample_0004.mp4
-            buffer, clip_indices = self.loadvideo_decord(sample)
+            # buffer, clip_indices = self.loadvideo_decord(sample)
+
+            buffer, clip_indices = self.load_npy(npy_path)
+
             # buffer: List len=16, clip_indices: List len=1
             # buffer[0] = shape(320, 426, 3), clip_indices = shape(16)
             # raise RuntimeError(len(buffer), buffer[0].shape, len(clip_indices), clip_indices[0].shape)
@@ -170,7 +257,12 @@ class VideoDataset(torch.utils.data.Dataset):
                 sample = self.samples[index]
 
         # Label/annotations for video
-        label = self.labels[index]
+        label_tensor = torch.zeros(self.num_label)
+        for article in sample['articles']:
+            label_id = self.labels[article]
+            label_tensor[label_id] = 1
+            # raise RuntimeError(label_id)
+        # end for
 
         def split_into_clips(video):
             """ Split video into a list of clips """
@@ -182,19 +274,64 @@ class VideoDataset(torch.utils.data.Dataset):
         if self.shared_transform is not None:
             buffer = self.shared_transform(buffer)
 
-        # raise RuntimeError(buffer.shape)  # [16, 320, 426, 3]
+        # buffer = [2, 3, 512, 512, 64]
         buffer = split_into_clips(buffer)
+        # buffer: List of 1 element, whose shape [2, 3, 512, 512, 64]
+        # raise RuntimeError(len(buffer), buffer[0].shape)
+
+        # raise RuntimeError(self.transform)
+        # """
         if self.transform is not None:
+            # raise RuntimeError( buffer[0].shape )
+            # clip.shape = [3, 2, 512, 512, 64]
             buffer = [self.transform(clip) for clip in buffer]
-            # buffer: List len=1, buffer[0]=[3, 16, 224, 224]
+            # buffer = torch.cat(buffer)
+            # raise RuntimeError( len(buffer), buffer[0].shape )
+            # buffer: List len=1, buffer[0]=[2, 3, 64, 224, 224]
             # raise RuntimeError(len(buffer), buffer[0].shape)
+        # """
 
         # buffer: List len=1, label: int, clip_indices: List len=1
         # raise RuntimeError(len(buffer), label, len(clip_indices))
         # buffer[0] = shape([3, 16, 224, 224])
-        # label =  0
-        # clip_indices[0] = shape(16)
-        return buffer, label, clip_indices
+
+        return buffer, label_tensor, clip_indices
+
+
+    def load_npy(self, sample):
+        try:
+            if self.use_aws:
+                buffer = open_npy(sample)
+            else:
+                buffer = np.load(sample)
+        except:
+            raise RuntimeError( f'aws: {self.use_aws}; sample: {sample}' )
+
+        # (3, 3, 512, 512, 66)
+        # raise RuntimeError(buffer.shape)
+
+        buffer = np.float32(buffer)
+        images = buffer
+        ref_image = []
+        for index, image in enumerate(images):
+            # raise RuntimeError(image.shape)
+            # image = shape((3, 512, 512, 66)
+            image = (image-image.min())/(image.max()-image.min())
+            image = torch.from_numpy(image).float()
+            ref_image.append(image)
+        # end for
+
+        if len(ref_image) > 2:
+            ref_image = random.sample(ref_image, 2)
+
+        vision_x = stack_images(ref_image)  # [2, 3, 512, 512, 64]
+        vision_x = vision_x.permute(1, 0, 2, 3, 4)  # [3, 2, 512, 512, 64]
+        # end if
+        # raise RuntimeError(vision_x.shape)
+
+        # depth = vision_x.shape[-1]
+        clip_indices = torch.zeros(64)
+        return vision_x, clip_indices
 
     def loadvideo_decord(self, sample):
         """ Load video content using Decord """

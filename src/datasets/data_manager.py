@@ -23,6 +23,7 @@ def init_data(
     world_size=1,
     rank=0,
     root_path=None,
+    label_paths=None,
     image_folder=None,
     training=True,
     copy_data=False,
@@ -43,6 +44,7 @@ def init_data(
     repeat_wds=False,
     ipe=300,
     log_dir=None,
+    use_aws=None,
 ):
 
     if (data.lower() == 'imagenet') \
@@ -87,5 +89,93 @@ def init_data(
             rank=rank,
             drop_last=drop_last,
             log_dir=log_dir)
+
+    elif data.lower() == 'radiopediadataset':
+        from src.datasets.radiopedia_dataset import make_radiopediadataset
+        dataset, data_loader, dist_sampler = make_radiopediadataset(
+            data_paths=root_path,
+            batch_size=batch_size,
+            frames_per_clip=clip_len,
+            frame_step=frame_sample_rate,
+            duration=duration,
+            num_clips=num_clips,
+            random_clip_sampling=random_clip_sampling,
+            allow_clip_overlap=allow_clip_overlap,
+            filter_short_videos=filter_short_videos,
+            filter_long_videos=filter_long_videos,
+            shared_transform=shared_transform,
+            transform=transform,
+            datasets_weights=datasets_weights,
+            collator=collator,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            drop_last=drop_last,
+            log_dir=log_dir,
+            use_aws=use_aws,
+        )
+
+    elif data.lower() == 'radiopedia_single_image_dataset':
+        from src.datasets.radiopedia_dataset import make_radiopediadataset
+        dataset, data_loader, dist_sampler = make_radiopediadataset(
+            data_paths=root_path,
+            batch_size=batch_size,
+            frames_per_clip=clip_len,
+            frame_step=frame_sample_rate,
+            duration=duration,
+            num_clips=num_clips,
+            random_clip_sampling=random_clip_sampling,
+            allow_clip_overlap=allow_clip_overlap,
+            filter_short_videos=filter_short_videos,
+            filter_long_videos=filter_long_videos,
+            shared_transform=shared_transform,
+            transform=transform,
+            datasets_weights=datasets_weights,
+            collator=collator,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            drop_last=drop_last,
+            log_dir=log_dir,
+            use_aws=use_aws,
+        )
+
+    elif data.lower() == 'joy_dataset':
+        from src.datasets.joy_dataset import make_joydataset
+        dataset, data_loader, dist_sampler = make_joydataset(
+            data_paths=root_path,
+            label_paths=label_paths,
+            batch_size=batch_size,
+            frames_per_clip=clip_len,
+            frame_step=frame_sample_rate,
+            duration=duration,
+            num_clips=num_clips,
+            random_clip_sampling=random_clip_sampling,
+            allow_clip_overlap=allow_clip_overlap,
+            filter_short_videos=filter_short_videos,
+            filter_long_videos=filter_long_videos,
+            shared_transform=shared_transform,
+            transform=transform,
+            datasets_weights=datasets_weights,
+            collator=collator,
+            num_workers=num_workers,
+            world_size=world_size,
+            rank=rank,
+            drop_last=drop_last,
+            log_dir=log_dir,
+            use_aws=use_aws,
+        )
+
+        logger.info( f"Begin to check dataset sample num" )
+        # for sample in dataset:
+        #     if len(sample) != 1:
+        #         raise RuntimeError( len(sample) )
+        logger.info( f"End Check" )
+        # end for
+        # [2, 3, 64, 64, 64]
+
+    else:
+        raise RuntimeError(f'{data.lower()} is not implemented')
+    # end if
 
     return (data_loader, dist_sampler)
