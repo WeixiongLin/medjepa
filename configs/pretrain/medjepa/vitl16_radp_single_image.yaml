@@ -2,14 +2,13 @@ app: medjepa
 nodes: 16
 tasks_per_node: 8
 data:
-  dataset_type: RadiopediaDataset
-  use_aws: 's3://zhangxiaoman_hdd_new/share_data/zhangxiaoman/DATA/Radio_VQA/processed_file/processed_images'
+  dataset_type: RadiopediaSingleImageDataset
   datasets:
     # - /mnt/petrelfs/linweixiong/jepa/data/radiology_article_npy_test.json
     - /mnt/petrelfs/linweixiong/jepa/data/radiology_article_npy_train.json
   decode_one_clip: true
   batch_size: 64
-  # batch_size: 8
+  # batch_size: 24
   num_clips: 1
   num_frames: 16
   tubelet_size: 2
@@ -76,14 +75,13 @@ model:
   use_mask_tokens: true
   zero_init_mask_tokens: true
 optimization:
-  ipe: 747  # 47.8K / BS = ipe
-  # ipe: 300
+  ipe: 300
   ipe_scale: 1.25
   clip_grad: 10.0
   weight_decay: 0.04
   final_weight_decay: 0.4
-  epochs: 30
-  warmup: 1
+  epochs: 300
+  warmup: 40
   start_lr: 0.0002
   lr: 0.000625
   final_lr: 1.0e-06
