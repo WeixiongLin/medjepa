@@ -52,7 +52,10 @@ class PatchEmbed3D(nn.Module):
         )
 
     def forward(self, x, **kwargs):
-        B, C, T, H, W = x.shape
+        # raise RuntimeError(x.shape)
+        # [BX=4 * 2, C=3, D=64, H=224, W=224]
+        BX, C, T, H, W = x.shape
+        # B, X, C, T, H, W = x.shape
         # proj -> [B, 1024, 8, 14, 14]
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x

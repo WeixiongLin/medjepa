@@ -16,6 +16,7 @@ from src.models.utils.modules import (
     CrossAttentionBlock
 )
 from src.utils.tensors import trunc_normal_
+from einops import rearrange, repeat
 
 
 class AttentivePooler(nn.Module):
@@ -94,7 +95,8 @@ class AttentivePooler(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        q = self.query_tokens.repeat(len(x), 1, 1)
+        # x = shape(32, 512, 1024)
+        q = self.query_tokens.repeat(len(x), 1, 1)  # [32, 1, 16]
         q = self.cross_attention_block(q, x)
         if self.blocks is not None:
             for blk in self.blocks:
@@ -132,5 +134,54 @@ class AttentiveClassifier(nn.Module):
 
     def forward(self, x):
         x = self.pooler(x).squeeze(1)
+        x = self.linear(x)
+        return x
+
+
+
+class LinearClassifier(nn.Module):
+    """ Linear Classifier """
+    def __init__(
+        self,
+        batch_size = None,
+        embed_dim=768,
+        num_heads=12,
+        mlp_ratio=4.0,
+        depth=1,
+        norm_layer=nn.LayerNorm,
+        init_std=0.02,
+        qkv_bias=True,
+        num_classes=1000,
+        complete_block=True,
+    ):
+        super().__init__()
+        """
+        self.pooler = AttentivePooler(
+            num_queries=1,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            depth=depth,
+            norm_layer=norm_layer,
+            init_std=init_std,
+            qkv_bias=qkv_bias,
+            complete_block=complete_block,
+        )
+        """
+        # imgs 经过 encoder 之后被提取为 512 个 1024d 的 token
+        # self.pooler = nn.AvgPool1d(kernel_size=512)
+        self.pooler = nn.AvgPool2d(kernel_size=(2, 512))
+        self.linear = nn.Linear(embed_dim, num_classes, bias=True)
+
+    def forward(self, x):
+        # x = shape(B * 2, L, C) = (16 * 2, 512, 1024)
+        # raise RuntimeError(x.shape, self.batch_size)
+        batch_size = len(x) // 2
+        x = rearrange(x, "(b S) l c-> b c S l", b = batch_size, S=2)
+        # raise RuntimeError(x.shape)  # (B, 2, C, L) = (B, 2, 1024, 512)
+        x = self.pooler(x)
+        # raise RuntimeError(x.shape)  # [B, 1024, 1, 1]
+        x = x.squeeze()
+        # raise RuntimeError( x.shape )  # [B, 1024]
         x = self.linear(x)
         return x

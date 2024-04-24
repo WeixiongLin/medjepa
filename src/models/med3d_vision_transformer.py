@@ -11,11 +11,13 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from src.models.utils.patch_embed import PatchEmbed, PatchEmbed3D
+# from src.models.utils.patch_embed import PatchEmbed, PatchEmbed3D
+from src.models.utils.med3d_patch_embed import PatchEmbed, PatchEmbed3D
 from src.models.utils.modules import Block
 from src.models.utils.pos_embs import get_2d_sincos_pos_embed, get_3d_sincos_pos_embed
 from src.utils.tensors import trunc_normal_
 from src.masks.utils import apply_masks
+from einops import rearrange, repeat
 
 
 class VisionTransformer(nn.Module):
@@ -47,14 +49,14 @@ class VisionTransformer(nn.Module):
         self.out_layers = out_layers
 
         self.input_size = img_size
-        self.patch_size = patch_size
+        self.patch_size = patch_size  # 16
 
-        self.num_frames = num_frames
+        self.num_frames = num_frames  # 16
         self.tubelet_size = tubelet_size
         self.is_video = num_frames > 1
 
-        grid_size = self.input_size // self.patch_size
-        grid_depth = self.num_frames // self.tubelet_size
+        grid_size = self.input_size // self.patch_size  # 14
+        grid_depth = self.num_frames // self.tubelet_size  # 16 / 2 = 8
 
         # Tokenize pixels with convolution
         if self.is_video:
@@ -161,6 +163,7 @@ class VisionTransformer(nn.Module):
         :param x: input image/video
         :param masks: indices of patch tokens to mask (remove)
         """
+        x = rearrange(x, "b S c d h w-> (b S) c d h w")
 
         if masks is not None and not isinstance(masks, list):
             masks = [masks]
@@ -170,6 +173,7 @@ class VisionTransformer(nn.Module):
         if pos_embed is not None:
             pos_embed = self.interpolate_pos_encoding(x, pos_embed)
         x = self.patch_embed(x)
+        # x = shape[4, 1568, 1024]  # 1568 = 8*14*14
         if pos_embed is not None:
             x += pos_embed
         B, N, D = x.shape
@@ -186,12 +190,15 @@ class VisionTransformer(nn.Module):
             if self.out_layers is not None and i in self.out_layers:
                 outs.append(self.norm(x))
         # end for
+
         if self.out_layers is not None:
             return outs
+
         if self.norm is not None:
             x = self.norm(x)
-        return x
 
+        # raise RuntimeError(x.shape)  # [32, 512, 1024]
+        return x
 
     def interpolate_pos_encoding(self, x, pos_embed):
 
@@ -200,12 +207,17 @@ class VisionTransformer(nn.Module):
         if self.is_video:
 
             # If pos_embed already corret size, just return
+            # x.shape = [B=4, X=2, C=3, D=64, H=224, W=224]
             _, _, T, H, W = x.shape
+            # _, _, _, T, H, W = x.shape
             if H == self.input_size and W == self.input_size and T == self.num_frames:
                 return pos_embed
 
             # Convert depth, height, width of input to be measured in patches
             # instead of pixels/frames
+
+            # T = 64, tubelet_size=2
+            # raise RuntimeError(T, self.tubelet_size)
             T = T // self.tubelet_size
             H = H // self.patch_size
             W = W // self.patch_size
