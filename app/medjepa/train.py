@@ -223,6 +223,8 @@ def main(param_args, args, resume_preempt=False):
         pred_embed_dim=pred_embed_dim,
         use_sdpa=use_sdpa,
     )
+    # raise RuntimeError(f"use_mask_tokens: {use_mask_tokens}, cfgs_mask: {cfgs_mask}, zero_init_mask_tokens: {zero_init_mask_tokens}, num_frames: {num_frames}, pred_depth: {pred_depth}, pred_embed_dim: {pred_embed_dim}")
+
     target_encoder = copy.deepcopy(encoder)
 
     # -- make data transforms
@@ -242,6 +244,7 @@ def main(param_args, args, resume_preempt=False):
             patch_size=patch_size,
             tubelet_size=tubelet_size,
             cfgs_mask=cfgs_mask)
+    # end if
     transform = make_transforms(
         random_horizontal_flip=True,
         random_resize_aspect_ratio=ar_range,

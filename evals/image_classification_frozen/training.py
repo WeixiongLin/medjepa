@@ -1,7 +1,7 @@
 import torch
 import logging
 from .losses import MultiLabelLoss
-from .evaluate import calculate_mAP, calculate_multilabel_AUC
+from .evaluate import calculate_mAP, calculate_multilabel_AUC, calculate_mF1max_MCC
 
 from src.utils.logging import (
     AverageMeter,
@@ -132,6 +132,7 @@ def run_one_epoch(
         # end if
     # end for
 
+    raise RuntimeError( type(all_outputs) )
     all_outputs_tensor = torch.cat(all_outputs)
     all_labels_tensor = torch.cat(all_labels)
 
@@ -139,6 +140,7 @@ def run_one_epoch(
     all_outputs_array, all_labels_array = all_outputs_tensor, all_labels_tensor
     mAP = calculate_mAP(all_labels_array, all_outputs_array)
     auc = calculate_multilabel_AUC(all_labels_array, all_outputs_array)
+    f1, mcc = calculate_mF1max_MCC(all_labels_array, all_outputs_array)
     # raise RuntimeError(mAP)
 
-    return {'mAP': mAP, 'auc': auc,}
+    return {'mAP': mAP, 'auc': auc, 'f1': f1, 'mcc': mcc}

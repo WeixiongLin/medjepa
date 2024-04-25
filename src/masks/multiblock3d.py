@@ -30,6 +30,7 @@ class MaskCollator(object):
         super(MaskCollator, self).__init__()
 
         self.mask_generators = []
+        # raise RuntimeError(len(cfgs_mask), cfgs_mask)
         for m in cfgs_mask:
             mask_generator = _MaskGenerator(
                 crop_size=crop_size,
@@ -52,13 +53,51 @@ class MaskCollator(object):
     def __call__(self, batch):
 
         batch_size = len(batch)
+        #x1= batch[0]
+        ## x1, x2, x3, x4: all tuple; batch is a list
+        ## tuple of 3 eles
+        ## x11, x12, x13 = x1  # x11, x13 is list len=1, x12 is int
+        ## x11[0] = tensor(3, 16, 224, 224)
+        ## x13[0] = tensor(16)
+        ## raise RuntimeError(x11[0].shape, x12, x13[0].shape)
+
+        vision_xs = [item[0][0] for item in batch]
+        vision_xs = torch.nn.utils.rnn.pad_sequence(
+            vision_xs, batch_first=True, padding_value=0
+        )
+        shapes = [x.shape for x in vision_xs]
+        # raise RuntimeError(shapes)
+        for i in range(len(vision_xs)):
+            batch[i][0][0] = vision_xs[i]
+
+        """
+        x1, x2, x3, x4 = batch
+        x11, x12, x13 = x1
+        x21, x22, x23 = x2
+        x31, x32, x33 = x3
+        x41, x42, x43 = x4
+        """
+        # raise RuntimeError(x12, x22, x32, x42)
+        # raise RuntimeError(x13.shape, x23.shape, x33.shape, x43.shape)  # 64, 64, 64, 36
+        # raise RuntimeError(x11[0].shape, x21[0].shape, x31[0].shape, x41[0].shape)
+        # raise RuntimeError( len(x11), x11[0].shape, len(x21), x21[0].shape, len(x31), x31[0].shape, len(x41), x41[0].shape )
+
+        # batch = [(x11), (x21), (x31), (x41)]
+        # batch = [(x12), (x22), (x32), (x42)]
+        # batch = [(x13), (x23), (x33), (x43)]
         collated_batch = torch.utils.data.default_collate(batch)
+        ## collated_batch[0][0] = tensor(4, 3, 16, 224, 224)
 
         collated_masks_pred, collated_masks_enc = [], []
+
         for i, mask_generator in enumerate(self.mask_generators):
             masks_enc, masks_pred = mask_generator(batch_size)
+            # masks_enc = shape(B, 472)
+            # masks_pred = shape(B, 808)
+            # raise RuntimeError(masks_enc.shape, masks_pred.shape)
             collated_masks_enc.append(masks_enc)
             collated_masks_pred.append(masks_pred)
+        # end for
 
         return collated_batch, collated_masks_enc, collated_masks_pred
 
@@ -136,6 +175,10 @@ class _MaskGenerator(object):
         return (t, h, w)
 
     def _sample_block_mask(self, b_size):
+        """
+        mask = torch.ones(duration, height, width)
+        where there's a zero block of b_size
+        """
         t, h, w = b_size
         top = torch.randint(0, self.height - h + 1, (1,))
         left = torch.randint(0, self.width - w + 1, (1,))
@@ -168,6 +211,8 @@ class _MaskGenerator(object):
             spatial_scale=self.spatial_pred_mask_scale,
             aspect_ratio_scale=self.aspect_ratio,
         )
+        ## raise RuntimeError(self.temporal_pred_mask_scale, self.spatial_pred_mask_scale, self.aspect_ratio)
+        ## [1.0, 1.0], [0.15, 0.15], [0.75, 1.5]
 
         collated_masks_pred, collated_masks_enc = [], []
         min_keep_enc = min_keep_pred = self.duration * self.height * self.width
@@ -178,7 +223,10 @@ class _MaskGenerator(object):
 
                 mask_e = torch.ones((self.duration, self.height, self.width), dtype=torch.int32)
                 for _ in range(self.npred):
+                    # sam_mask = self._sample_block_mask(p_size)
+                    # raise RuntimeError(p_size, self.duration, self.width, self.height, sam_mask.shape)
                     mask_e *= self._sample_block_mask(p_size)
+                # end for
                 mask_e = mask_e.flatten()
 
                 mask_p = torch.argwhere(mask_e == 0).squeeze()
@@ -190,6 +238,9 @@ class _MaskGenerator(object):
                     min_keep_enc = min(min_keep_enc, len(mask_e))
                     collated_masks_pred.append(mask_p)
                     collated_masks_enc.append(mask_e)
+                # end if
+            # end while
+        # end for
 
         if self.max_keep is not None:
             min_keep_enc = min(min_keep_enc, self.max_keep)
@@ -200,4 +251,8 @@ class _MaskGenerator(object):
         collated_masks_enc = [cm[:min_keep_enc] for cm in collated_masks_enc]
         collated_masks_enc = torch.utils.data.default_collate(collated_masks_enc)
 
+        # collated_masks_enc = [tensor(472)*B]
+        # collated_masks_pred = [tensor(808)*B]
+        # raise RuntimeError( collated_masks_enc[1].shape, collated_masks_pred[1].shape )
         return collated_masks_enc, collated_masks_pred
+

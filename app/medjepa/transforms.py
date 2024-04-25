@@ -112,6 +112,8 @@ class VideoTransform(object):
             scale=self.random_resize_scale,
             ratio=self.random_resize_aspect_ratio,
         )
+        if buffer.shape != torch.Size([3, 2, 64, 64, 64]):
+            raise RuntimeError( buffer.shape )
         if self.random_horizontal_flip:
             buffer, _ = image3d_transforms.horizontal_flip(0.5, buffer)
 

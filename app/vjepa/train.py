@@ -47,6 +47,7 @@ from app.vjepa.utils import (
 )
 from app.vjepa.transforms import make_transforms
 
+import wandb
 
 # --
 log_timings = True
@@ -63,13 +64,13 @@ torch.backends.cudnn.benchmark = True
 logger = get_logger(__name__)
 
 
-def main(args, resume_preempt=False):
+def main(param_args, args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
     # ----------------------------------------------------------------------- #
 
     # -- META
-    cfgs_meta = args.get('meta')
+    cfgs_meta = param_args.get('meta')
     load_model = cfgs_meta.get('load_checkpoint') or resume_preempt
     r_file = cfgs_meta.get('read_checkpoint', None)
     seed = cfgs_meta.get('seed', _GLOBAL_SEED)
@@ -89,10 +90,10 @@ def main(args, resume_preempt=False):
         mixed_precision = False
 
     # -- MASK
-    cfgs_mask = args.get('mask')
+    cfgs_mask = param_args.get('mask')
 
     # -- MODEL
-    cfgs_model = args.get('model')
+    cfgs_model = param_args.get('model')
     model_name = cfgs_model.get('model_name')
     pred_depth = cfgs_model.get('pred_depth')
     pred_embed_dim = cfgs_model.get('pred_embed_dim')
@@ -101,7 +102,7 @@ def main(args, resume_preempt=False):
     zero_init_mask_tokens = cfgs_model.get('zero_init_mask_tokens', True)
 
     # -- DATA
-    cfgs_data = args.get('data')
+    cfgs_data = param_args.get('data')
     dataset_type = cfgs_data.get('dataset_type', 'videodataset')
     mask_type = cfgs_data.get('mask_type', 'multiblock3d')
     dataset_paths = cfgs_data.get('datasets', [])
@@ -123,7 +124,7 @@ def main(args, resume_preempt=False):
     log_resource_util_data = cfgs_data.get('log_resource_utilization', False)
 
     # -- DATA AUGS
-    cfgs_data_aug = args.get('data_aug')
+    cfgs_data_aug = param_args.get('data_aug')
     ar_range = cfgs_data_aug.get('random_resize_aspect_ratio', [3/4, 4/3])
     rr_scale = cfgs_data_aug.get('random_resize_scale', [0.3, 1.0])
     motion_shift = cfgs_data_aug.get('motion_shift', False)
@@ -131,12 +132,12 @@ def main(args, resume_preempt=False):
     use_aa = cfgs_data_aug.get('auto_augment', False)
 
     # -- LOSS
-    cfgs_loss = args.get('loss')
+    cfgs_loss = param_args.get('loss')
     loss_exp = cfgs_loss.get('loss_exp')
     reg_coeff = cfgs_loss.get('reg_coeff')
 
     # -- OPTIMIZATION
-    cfgs_opt = args.get('optimization')
+    cfgs_opt = param_args.get('optimization')
     ipe = cfgs_opt.get('ipe', None)
     ipe_scale = cfgs_opt.get('ipe_scale', 1.0)
     clip_grad = cfgs_opt.get('clip_grad', None)
@@ -152,7 +153,7 @@ def main(args, resume_preempt=False):
     eps = cfgs_opt.get('eps', 1.e-8)
 
     # -- LOGGING
-    cfgs_logging = args.get('logging')
+    cfgs_logging = param_args.get('logging')
     folder = cfgs_logging.get('folder')
     tag = cfgs_logging.get('write_tag')
 
@@ -379,6 +380,14 @@ def main(args, resume_preempt=False):
         for itr in range(ipe):
             itr_start_time = time.time()
 
+            # udata: List len=3, udata[0] = List len=1
+            ## udata[0][0] = tensor(B, 3, 16, 224, 224)
+            ## udata[1] = label=tensor(B)
+            ## udata[2] = clip_indice=List[tensor(B, 16)*4]
+            # masks_enc: List len=2, masks_enc = [tensor(B, 472), tensor(B, 48)]
+            # masks_pred: List len=2, masks_pred = [tensor(B, 808), tensor(B, 1232)]
+            # udata, masks_enc, masks_pred = next(loader)
+            # raise RuntimeError(masks_enc[1].shape, masks_pred[1].shape)
             try:
                 udata, masks_enc, masks_pred = next(loader)
             except Exception:
@@ -398,15 +407,19 @@ def main(args, resume_preempt=False):
                 # same mask pair for each clip
                 _masks_enc, _masks_pred = [], []
                 for _me, _mp in zip(masks_enc, masks_pred):
-                    _me = _me.to(device, non_blocking=True)
-                    _mp = _mp.to(device, non_blocking=True)
-                    _me = repeat_interleave_batch(_me, batch_size, repeat=num_clips)
+                    _me = _me.to(device, non_blocking=True)  # [B, 384]
+                    _mp = _mp.to(device, non_blocking=True)  # [B, 936]
+                    _me = repeat_interleave_batch(_me, batch_size, repeat=num_clips)  # num_clips = 1
                     _mp = repeat_interleave_batch(_mp, batch_size, repeat=num_clips)
                     _masks_enc.append(_me)
                     _masks_pred.append(_mp)
 
                 return (clips, _masks_enc, _masks_pred)
             clips, masks_enc, masks_pred = load_clips()
+            ## clips = shape(B, 3, 16, 224, 224)
+            ## masks_enc = shape(B, 384)
+            ## masks_pred = shape(B, 936)
+            # raise RuntimeError(clips.shape, masks_enc[0].shape, masks_pred[0].shape)
 
             for _i, m in enumerate(mask_meters):
                 m.update(masks_enc[_i][0].size(-1))
@@ -422,11 +435,13 @@ def main(args, resume_preempt=False):
                     mask-pred.
                     """
                     with torch.no_grad():
-                        h = target_encoder(c)
+                        h = target_encoder(c)  # [B, 1568, 1024]
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim  [B, N, D]
                         # -- create targets (masked regions of h)
+                        # masks_pred: List[(B, 808), (B, 1232)]
                         h = apply_masks(h, masks_pred, concat=False)
                         return h
+                # end def
 
                 def forward_context(c, h):
                     """
@@ -436,6 +451,7 @@ def main(args, resume_preempt=False):
                     z = encoder(c, masks_enc)
                     z = predictor(z, h, masks_enc, masks_pred)
                     return z
+                # end def
 
                 def loss_fn(z, h):
                     loss = 0.
@@ -451,12 +467,14 @@ def main(args, resume_preempt=False):
                 # Step 1. Forward
                 loss_jepa, loss_reg = 0., 0.
                 with torch.cuda.amp.autocast(dtype=dtype, enabled=mixed_precision):
-                    h = forward_target(clips)
-                    z = forward_context(clips, h)
+                    # clips = shape[B, 3, T, H, W] = [4, 3, 16, 224, 224]
+                    h = forward_target(clips)  # h = list[(B, 808, 1024), (B, 1232, 1024)]
+                    z = forward_context(clips, h)  # z = list[(B, 936, 1024), (B, 1144, 1024)]
                     loss_jepa = loss_fn(z, h)  # jepa prediction loss
                     pstd_z = reg_fn(z)  # predictor variance across patches
                     loss_reg += torch.mean(F.relu(1.-pstd_z))
                 loss = loss_jepa + reg_coeff * loss_reg
+                # raise RuntimeError(loss)
 
                 # Step 2. Backward & step
                 _enc_norm, _pred_norm = 0., 0.
@@ -572,6 +590,21 @@ def main(args, resume_preempt=False):
                                grad_stats_pred.min,
                                grad_stats_pred.max,
                                grad_stats_pred.global_norm))
+                    # end if
+                # end if
+
+                # 3. wandb logger
+                log_data = {
+                    'loss': loss_meter.avg,
+                    'jepa_loss': jepa_loss_meter.avg,
+                    'reg_loss': reg_loss_meter.avg,
+                }
+                log_data = {"train/" + name: val for name, val in log_data.items()}
+                if args.use_wandb:
+                    wandb.log(log_data, step=epoch * ipe + itr)
+                # end if
+            # end def
+                
             log_stats()
             assert not np.isnan(loss), 'loss is nan'
 

@@ -9,10 +9,9 @@ data:
   # root_path: /mnt/petrelfs/linweixiong/jepa/data/joy/
   train_datasets:
     # - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/comb_dict.json
-    - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/comb_dict_1000.json
     # - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/comb_dict_100.json
-    # - /mnt/petrelfs/linweixiong/jepa/data/joy/radio_3d_case_level_link_dict_final_all_new_eval.json
-  val_datasets:
+    - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/comb_dict_1000.json
+  eval_datasets:
     - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/comb_dict_100.json
   labels:
     - /mnt/petrelfs/linweixiong/jepa/data/joy/ForWeixiong/sorted_disease_label_dict.json
@@ -34,7 +33,7 @@ data_aug:
   reprob: 0.0
 optimization:
   num_epochs: 20
-  batch_size: 16
+  batch_size: 64
   weight_decay: 0.001
   lr: 0.001
   start_lr: 0.001

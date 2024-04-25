@@ -87,7 +87,8 @@ def main(args_eval, resume_preempt=False):
     num_classes = args_data.get('num_classes')
 
     # root_path = args_data.get('root_path', None)
-    dataset_paths = args_data.get('datasets', [])
+    train_dataset_paths = args_data.get('train_datasets', [])
+    eval_dataset_paths = args_data.get('eval_datasets', [])
     label_paths = args_data.get('labels', [])
     image_folder = args_data.get('image_folder', None)
     resolution = args_data.get('resolution', 224)
@@ -215,7 +216,7 @@ def main(args_eval, resume_preempt=False):
     train_loader = make_dataloader(
         dataset_name=dataset_name,
         # root_path=root_path,
-        root_path=dataset_paths,
+        root_path=train_dataset_paths,
         label_paths=label_paths,
         resolution=resolution,
         image_folder=image_folder,
@@ -230,7 +231,7 @@ def main(args_eval, resume_preempt=False):
     val_loader = make_dataloader(
         dataset_name=dataset_name,
         # root_path=root_path,
-        root_path=dataset_paths,
+        root_path=eval_dataset_paths,
         label_paths=label_paths,
         resolution=resolution,
         image_folder=image_folder,
@@ -289,6 +290,14 @@ def main(args_eval, resume_preempt=False):
         }
         if rank == 0:
             torch.save(save_dict, latest_path)
+
+    # for itr, data in enumerate(val_loader):
+    for itr, data in enumerate(train_loader):
+        x, y, z = data
+        # raise RuntimeError( type(x[0]) )
+        print(f"itr: {itr}, data: {x[0].shape, y.shape, z.shape}")
+    # end for
+    raise RuntimeError("valset intergrity check")
 
     # TRAIN LOOP
     for epoch in range(start_epoch, num_epochs):
